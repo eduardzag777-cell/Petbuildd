@@ -1,0 +1,491 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate project
+        run: |
+          set -e
+          mkdir -p app/src/main/res/layout app/src/main/res/values app/src/main/java/com/example/pet
+          cat > settings.gradle.kts <<'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "DeskPet"
+          include(":app")
+          EOF_FILE
+          cat > build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+          cat > gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF_FILE
+          cat > app/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.pet"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.pet"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.12.0")
+              implementation("androidx.appcompat:appcompat:1.6.1")
+          }
+          EOF_FILE
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="@string/app_name"
+                  android:theme="@style/Theme.AppCompat.DayNight">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".PetService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="desktop_pet" />
+                  </service>
+
+              </application>
+          </manifest>
+          EOF_FILE
+          cat > app/src/main/res/layout/activity_main.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:gravity="center"
+              android:orientation="vertical"
+              android:padding="24dp">
+
+              <TextView
+                  android:id="@+id/tvStatus"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:text="@string/status_stopped"
+                  android:textSize="20sp"
+                  android:gravity="center" />
+
+              <Button
+                  android:id="@+id/btnStart"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="24dp"
+                  android:text="@string/btn_start" />
+
+              <Button
+                  android:id="@+id/btnStop"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="12dp"
+                  android:text="@string/btn_stop" />
+          </LinearLayout>
+          EOF_FILE
+          cat > app/src/main/res/values/strings.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Питомец</string>
+              <string name="status_stopped">Питомец не запущен</string>
+              <string name="status_running">Питомец гуляет по экрану</string>
+              <string name="btn_start">Выпустить питомца</string>
+              <string name="btn_stop">Убрать питомца</string>
+              <string name="need_overlay">Разрешите показ поверх других окон</string>
+              <string name="channel_name">Питомец</string>
+              <string name="notification_title">Питомец активен</string>
+              <string name="notification_text">Гуляет по экрану</string>
+          </resources>
+          EOF_FILE
+          cat > app/src/main/java/com/example/pet/MainActivity.kt <<'EOF_FILE'
+          package com.example.pet
+
+          import android.Manifest
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.Button
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.content.ContextCompat
+
+          class MainActivity : AppCompatActivity() {
+
+              private val notificationPermissionLauncher =
+                  registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+                      if (granted) startPet() else Toast.makeText(
+                          this, R.string.need_overlay, Toast.LENGTH_SHORT
+                      ).show()
+                  }
+
+              private val overlayPermissionLauncher =
+                  registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+                      if (Settings.canDrawOverlays(this)) {
+                          requestNotificationThenStart()
+                      } else {
+                          Toast.makeText(this, R.string.need_overlay, Toast.LENGTH_SHORT).show()
+                      }
+                  }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+
+                  findViewById<Button>(R.id.btnStart).setOnClickListener { onStartClicked() }
+                  findViewById<Button>(R.id.btnStop).setOnClickListener {
+                      stopService(Intent(this, PetService::class.java))
+                      findViewById<TextView>(R.id.tvStatus).setText(R.string.status_stopped)
+                  }
+              }
+
+              private fun onStartClicked() {
+                  if (!Settings.canDrawOverlays(this)) {
+                      val intent = Intent(
+                          Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                          Uri.parse("package:$packageName")
+                      )
+                      overlayPermissionLauncher.launch(intent)
+                  } else {
+                      requestNotificationThenStart()
+                  }
+              }
+
+              private fun requestNotificationThenStart() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                      ContextCompat.checkSelfPermission(
+                          this, Manifest.permission.POST_NOTIFICATIONS
+                      ) != PackageManager.PERMISSION_GRANTED
+                  ) {
+                      notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                  } else {
+                      startPet()
+                  }
+              }
+
+              private fun startPet() {
+                  ContextCompat.startForegroundService(this, Intent(this, PetService::class.java))
+                  findViewById<TextView>(R.id.tvStatus).setText(R.string.status_running)
+              }
+          }
+          EOF_FILE
+          cat > app/src/main/java/com/example/pet/PetService.kt <<'EOF_FILE'
+          package com.example.pet
+
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.os.Build
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.view.Gravity
+          import android.view.WindowManager
+          import android.widget.FrameLayout
+          import android.widget.TextView
+          import androidx.core.app.NotificationCompat
+          import kotlin.random.Random
+
+          class PetService : Service() {
+
+              companion object {
+                  private const val CHANNEL_ID = "pet_channel"
+                  private const val NOTIFICATION_ID = 2001
+
+                  private val JOKES = listOf(
+                      "Почему программисты путают Хэллоуин и Рождество? OCT 31 == DEC 25.",
+                      "Как называется программист, который не пьёт кофе? Никак, таких не бывает.",
+                      "Доктор, у меня бессонница.\nПропишите код-ревью перед сном.",
+                      "Сколько программистов нужно, чтобы вкрутить лампочку?\nНи одного, это аппаратная проблема.",
+                      "Я не сплю, я в режиме энергосбережения.",
+                      "Кот — это баг эволюции, который все приняли за фичу."
+                  )
+                  private val BEG_PHRASES = listOf(
+                      "Не удаляй меня!",
+                      "Я ещё пригожусь!",
+                      "Пощади!",
+                      "Мы же друзья!"
+                  )
+              }
+
+              private lateinit var windowManager: WindowManager
+              private var petView: TextView? = null
+              private var bubbleView: TextView? = null
+              private var petParams: WindowManager.LayoutParams? = null
+
+              private val handler = Handler(Looper.getMainLooper())
+              private var dx = 1
+              private var screenWidth = 0
+              private var screenHeight = 0
+              private var petSize = 0
+              private var bubbleHideRunnable: Runnable? = null
+
+              private val walkRunnable = object : Runnable {
+                  override fun run() {
+                      moveStep()
+                      handler.postDelayed(this, 40)
+                  }
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+                  val metrics = resources.displayMetrics
+                  screenWidth = metrics.widthPixels
+                  screenHeight = metrics.heightPixels
+                  petSize = (56 * metrics.density).toInt()
+                  addPetView()
+                  handler.post(walkRunnable)
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  createChannel()
+                  val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+                      .setSmallIcon(android.R.drawable.ic_menu_compass)
+                      .setContentTitle(getString(R.string.notification_title))
+                      .setContentText(getString(R.string.notification_text))
+                      .setOngoing(true)
+                      .build()
+                  startForeground(NOTIFICATION_ID, notification)
+                  return START_STICKY
+              }
+
+              private fun overlayType() =
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                  else
+                      @Suppress("DEPRECATION")
+                      WindowManager.LayoutParams.TYPE_PHONE
+
+              private fun addPetView() {
+                  val view = TextView(this).apply {
+                      text = "\uD83D\uDC31"
+                      textSize = 32f
+                      gravity = Gravity.CENTER
+                  }
+                  val params = WindowManager.LayoutParams(
+                      petSize, petSize,
+                      overlayType(),
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  params.gravity = Gravity.TOP or Gravity.START
+                  params.x = Random.nextInt(0, (screenWidth - petSize).coerceAtLeast(1))
+                  params.y = Random.nextInt(screenHeight / 4, screenHeight / 2)
+
+                  view.setOnClickListener { onPetTapped() }
+
+                  try {
+                      windowManager.addView(view, params)
+                      petView = view
+                      petParams = params
+                  } catch (_: Exception) {
+                      stopSelf()
+                  }
+              }
+
+              private fun onPetTapped() {
+                  // Случайная реакция на касание питомца: шутка, "не удаляй меня" или мурлыканье.
+                  val roll = Random.nextInt(3)
+                  val text = when (roll) {
+                      0 -> JOKES.random()
+                      1 -> BEG_PHRASES.random()
+                      else -> "Мурр~"
+                  }
+                  showBubble(text)
+              }
+
+              private fun showBubble(text: String) {
+                  bubbleHideRunnable?.let { handler.removeCallbacks(it) }
+                  removeBubble()
+
+                  val params = petParams ?: return
+                  val bubble = TextView(this).apply {
+                      this.text = text
+                      textSize = 13f
+                      setTextColor(Color.BLACK)
+                      setBackgroundColor(Color.parseColor("#FFFACD"))
+                      setPadding(24, 16, 24, 16)
+                      maxWidth = (screenWidth * 0.6).toInt()
+                  }
+                  val bubbleParams = WindowManager.LayoutParams(
+                      FrameLayout.LayoutParams.WRAP_CONTENT,
+                      FrameLayout.LayoutParams.WRAP_CONTENT,
+                      overlayType(),
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  bubbleParams.gravity = Gravity.TOP or Gravity.START
+                  bubbleParams.x = (params.x - 20).coerceAtLeast(0)
+                  bubbleParams.y = (params.y - petSize).coerceAtLeast(0)
+
+                  try {
+                      windowManager.addView(bubble, bubbleParams)
+                      bubbleView = bubble
+                      val hide = Runnable { removeBubble() }
+                      bubbleHideRunnable = hide
+                      handler.postDelayed(hide, 3500)
+                  } catch (_: Exception) {
+                  }
+              }
+
+              private fun removeBubble() {
+                  bubbleView?.let {
+                      try {
+                          windowManager.removeView(it)
+                      } catch (_: Exception) {
+                      }
+                  }
+                  bubbleView = null
+              }
+
+              private fun moveStep() {
+                  val view = petView ?: return
+                  val params = petParams ?: return
+
+                  params.x += dx * 4
+                  if (params.x <= 0) {
+                      params.x = 0
+                      dx = 1
+                  } else if (params.x >= screenWidth - petSize) {
+                      params.x = screenWidth - petSize
+                      dx = -1
+                  }
+                  view.scaleX = if (dx < 0) -1f else 1f
+
+                  if (Random.nextInt(60) == 0) {
+                      params.y = (params.y + Random.nextInt(-40, 41))
+                          .coerceIn(0, screenHeight - petSize)
+                  }
+
+                  if ((params.x == 0 || params.x == screenWidth - petSize) && Random.nextInt(20) == 0) {
+                      showBubble(JOKES.random())
+                  }
+
+                  try {
+                      windowManager.updateViewLayout(view, params)
+                      bubbleView?.let { b ->
+                          val bp = b.layoutParams as? WindowManager.LayoutParams
+                          if (bp != null) {
+                              bp.x = (params.x - 20).coerceAtLeast(0)
+                              bp.y = (params.y - petSize).coerceAtLeast(0)
+                              windowManager.updateViewLayout(b, bp)
+                          }
+                      }
+                  } catch (_: Exception) {
+                  }
+              }
+
+              private fun createChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val channel = NotificationChannel(
+                          CHANNEL_ID, getString(R.string.channel_name), NotificationManager.IMPORTANCE_LOW
+                      )
+                      getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+                  }
+              }
+
+              override fun onDestroy() {
+                  handler.removeCallbacksAndMessages(null)
+                  petView?.let {
+                      try {
+                          windowManager.removeView(it)
+                      } catch (_: Exception) {
+                      }
+                  }
+                  removeBubble()
+                  super.onDestroy()
+              }
+          }
+          EOF_FILE
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v${{ github.run_number }}" app/build/outputs/apk/debug/app-debug.apk --title "APK ${{ github.run_number }}" --notes "Debug APK"
+permissions:
+  contents: write
